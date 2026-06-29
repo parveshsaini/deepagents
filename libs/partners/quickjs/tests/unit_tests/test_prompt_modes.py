@@ -90,3 +90,33 @@ def test_render_eval_tool_description_mode_specific(
     description = render_eval_tool_description(mode=mode)
     assert expected_fragment in description
     assert description.startswith("Execute JavaScript in a sandboxed REPL.")
+
+
+@pytest.mark.parametrize("mode", ["thread", "turn", "call"])
+def test_render_eval_tool_description_does_not_deny_top_level_await(
+    mode: Literal["thread", "turn", "call"],
+) -> None:
+    """The description must not tell the model top-level `await` won't resolve.
+
+    `_repl._aeval_async` drives a final-expression Promise via
+    `handle.await_promise(...)`, so the description must not claim otherwise.
+    """
+    description = render_eval_tool_description(mode=mode)
+    assert "will not resolve" not in description
+    assert "Synchronous only" not in description
+
+
+@pytest.mark.parametrize("mode", ["thread", "turn", "call"])
+def test_eval_tool_description_agrees_with_system_prompt_on_await(
+    mode: Literal["thread", "turn", "call"],
+) -> None:
+    """Description and system prompt must not contradict each other on await."""
+    description = render_eval_tool_description(mode=mode)
+    system_prompt = render_repl_system_prompt(
+        tool_name="eval",
+        timeout=5.0,
+        memory_limit_mb=64,
+        mode=mode,
+    )
+    assert "Top-level `await` works" in system_prompt
+    assert "await` will not resolve" not in description
