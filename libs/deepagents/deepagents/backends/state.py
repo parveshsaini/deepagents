@@ -368,11 +368,17 @@ class StateBackend(BackendProtocol):
         for path, content in files:
             try:
                 text = content.decode("utf-8")
+                encoding = "utf-8"
             except UnicodeDecodeError:
                 text = base64.b64encode(content).decode("ascii")
+                encoding = "base64"
 
             prev = existing.get(path)
-            file_data = update_file_data(prev, text) if prev else create_file_data(text)
+            if prev:
+                file_data = update_file_data(prev, text)
+                file_data["encoding"] = encoding
+            else:
+                file_data = create_file_data(text, encoding=encoding)
             update[path] = {**file_data}
             responses.append(FileUploadResponse(path=path, error=None))
 

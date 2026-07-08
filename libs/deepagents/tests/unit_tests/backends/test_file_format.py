@@ -13,9 +13,11 @@ Covers:
 import base64
 import warnings
 
+from langgraph.graph import END, START, StateGraph
 from langgraph.store.memory import InMemoryStore
 
 from deepagents.backends.protocol import ReadResult
+from deepagents.backends.state import StateBackend
 from deepagents.backends.store import StoreBackend
 from deepagents.backends.utils import (
     _to_legacy_file_data,
@@ -24,6 +26,7 @@ from deepagents.backends.utils import (
     file_data_to_string,
     grep_matches_from_files,
 )
+from deepagents.middleware.filesystem import FilesystemState
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -137,6 +140,75 @@ def test_store_upload_download_binary_round_trip():
     assert len(responses) == 1
     assert responses[0].error is None
     assert responses[0].content == original_bytes
+
+
+# ---------------------------------------------------------------------------
+# 6b. State backend binary round-trip (regression: encoding tag)
+# ---------------------------------------------------------------------------
+
+
+def _run_state_nodes(node_fns):
+    """Run each `fn(backend)` in its own node of a minimal graph, collecting returns.
+
+    StateBackend reads/writes through a LangGraph execution context, so we
+    drive it inside a compiled graph whose `files` channel matches the
+    filesystem middleware's (`FilesystemState`). State committed by one node
+    is visible to the next, so multiple nodes let us cover the overwrite path.
+    """
+    results = []
+    graph = StateGraph(FilesystemState)
+    prev = START
+    for i, fn in enumerate(node_fns):
+        name = f"n{i}"
+
+        def _node(state, _fn=fn):  # noqa: ARG001 - langgraph passes state to every node
+            results.append(_fn(StateBackend()))
+            return {}
+
+        graph.add_node(name, _node)
+        graph.add_edge(prev, name)
+        prev = name
+    graph.add_edge(prev, END)
+    graph.compile().invoke({"messages": []})
+    return results
+
+
+def test_state_upload_download_binary_round_trip():
+    """StateBackend must return the original bytes for a binary round-trip.
+
+    Regression: upload_files stored base64 content but tagged it "utf-8",
+    so download_files returned the base64 text as bytes, not the file.
+    """
+    original_bytes = b"\x89PNG\r\n\x1a\n" + bytes(range(256))
+
+    def _round_trip(be):
+        be.upload_files([("/images/photo.png", original_bytes)])
+        [resp] = be.download_files(["/images/photo.png"])
+        return resp.content
+
+    [downloaded] = _run_state_nodes([_round_trip])
+    assert downloaded == original_bytes
+
+
+def test_state_overwrite_text_with_binary_round_trip():
+    """Overwriting a text file with binary must retag the encoding.
+
+    update_file_data preserves the previous file's encoding, so a
+    text -> binary overwrite must set encoding="base64" explicitly or the
+    downloaded bytes are the base64 text of the new content.
+    """
+    png = b"\x89PNG\r\n\x1a\n" + bytes(range(256))
+
+    def _write_text(be):
+        be.upload_files([("/f.bin", b"plain text")])
+
+    def _overwrite_binary(be):
+        be.upload_files([("/f.bin", png)])
+        [resp] = be.download_files(["/f.bin"])
+        return resp.content
+
+    _, downloaded = _run_state_nodes([_write_text, _overwrite_binary])
+    assert downloaded == png
 
 
 # ---------------------------------------------------------------------------
